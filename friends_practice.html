@@ -222,6 +222,24 @@
     .quiz-context-line { font-size: 14px; line-height: 1.6; color: var(--muted); margin-bottom: 4px; }
     .quiz-context-line:last-child { margin-bottom: 0; }
     .quiz-context-line .speaker { font-weight: 700; color: var(--primary); }
+    .cloze-context { margin-bottom: 10px; padding: 8px 10px; background: #f6f3ed; border-radius: 8px; border: 1px dashed var(--border); }
+    .cloze-context-line { font-size: 13px; line-height: 1.6; color: var(--muted); margin-bottom: 3px; }
+    .cloze-context-line:last-child { margin-bottom: 0; }
+    .cloze-context-line .speaker { font-weight: 700; color: var(--primary); }
+    .cloze-opt-row { display: flex; align-items: stretch; gap: 6px; }
+    .cloze-opt-row .quiz-opt { flex: 1; }
+    .word-save-btn {
+        flex: 0 0 auto;
+        border: 2px solid var(--border);
+        background: #fff;
+        color: var(--accent);
+        border-radius: 8px;
+        width: 40px;
+        font-size: 16px;
+        cursor: pointer;
+    }
+    .word-save-btn:hover { border-color: var(--accent); }
+    .word-save-btn.saved { background: #fff3cd; border-color: var(--accent); }
     .clickable-word { cursor: pointer; border-bottom: 2px dotted var(--primary); border-radius: 3px; padding: 0 1px; }
     .clickable-word:hover { background: #f1eef8; }
     .clickable-word.saved { background: #fff3cd; border-bottom-color: var(--accent); font-weight: 700; }
@@ -419,6 +437,15 @@ let listenState = { rate: 1, voiceURI: '', dictationMode: false, playingIndex: -
 // ============================= Utilities =============================
 function escapeHtml(str) {
     return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function jsAttr(str) {
+    return String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;');
 }
 function shuffle(arr) {
     const a = arr.slice();
@@ -662,17 +689,27 @@ function makeClozeQuestion(line, ep) {
     const pool = ep.vocab.map(v => v.word).filter(w => w !== answer);
     const distractors = sample(pool, Math.min(3, pool.length));
     const options = shuffle([answer, ...distractors]);
-    return { speaker: line.speaker, sentence: displayWords.join(' '), answer, options };
+    const lineIdx = ep.dialogue.indexOf(line);
+    const contextStart = Math.max(0, lineIdx - 2);
+    const context = ep.dialogue.slice(contextStart, lineIdx).map(d => ({ speaker: d.speaker, text: cleanText(d.text) }));
+    return { speaker: line.speaker, sentence: displayWords.join(' '), context, answer, options };
 }
 
 function generateClozeSet(ep) {
     const eligible = ep.dialogue.filter(d => cleanText(d.text).split(/\s+/).length >= 3);
-    const picked = sample(eligible, Math.min(10, eligible.length));
+    const picked = sample(eligible, Math.min(20, eligible.length));
     const questions = picked
         .map(line => makeClozeQuestion(line, ep))
         .filter(q => q && q.options.length >= 2)
         .map(q => ({ ...q, checked: false, correct: null, selected: null }));
     clozeState = { questions, score: 0, answered: 0 };
+}
+
+function renderClozeContext(context) {
+    if (!context || context.length === 0) return '';
+    return `<div class="cloze-context">${context.map(d =>
+        `<div class="cloze-context-line"><span class="speaker">${escapeHtml(d.speaker)}:</span> "${renderClickableText(d.text)}"</div>`
+    ).join('')}</div>`;
 }
 
 function renderCloze(container, ep) {
@@ -688,8 +725,9 @@ function renderCloze(container, ep) {
         </div>`;
     clozeState.questions.forEach((q, i) => {
         html += `<div class="cloze-q">
+            ${renderClozeContext(q.context)}
             <div class="speaker">${escapeHtml(q.speaker)}</div>
-            <div class="sentence">${escapeHtml(q.sentence)}</div>
+            <div class="sentence">${renderClickableText(q.sentence)}</div>
             <div class="quiz-options" style="margin-top:10px;">`;
         q.options.forEach(opt => {
             let cls = '';
@@ -697,7 +735,11 @@ function renderCloze(container, ep) {
                 if (opt === q.answer) cls = 'reveal-correct';
                 else if (opt === q.selected && opt !== q.answer) cls = 'selected-incorrect';
             }
-            html += `<button class="quiz-opt ${cls}" ${q.checked ? 'disabled' : ''} onclick="checkClozeAnswer(${i}, '${encodeURIComponent(opt)}')">${escapeHtml(opt)}</button>`;
+            const isSaved = !!unknownWords[opt];
+            html += `<div class="cloze-opt-row">
+                <button class="quiz-opt ${cls}" ${q.checked ? 'disabled' : ''} onclick="checkClozeAnswer(${i}, '${jsAttr(opt)}')">${escapeHtml(opt)}</button>
+                <button class="word-save-btn ${isSaved ? 'saved' : ''}" onclick="event.stopPropagation(); toggleUnknownWord('${jsAttr(opt)}', '${jsAttr(q.sentence.replace('_____', q.answer))}')" title="加入/移除不懂的單字">${isSaved ? '★' : '☆'}</button>
+            </div>`;
         });
         html += `</div>`;
         if (q.checked) {
@@ -706,13 +748,13 @@ function renderCloze(container, ep) {
         html += `</div>`;
     });
     html += '</div>';
+    html += renderSavedWordsPanel();
     container.innerHTML = html;
 }
 
-function checkClozeAnswer(i, encodedOpt) {
+function checkClozeAnswer(i, opt) {
     const q = clozeState.questions[i];
     if (q.checked) return;
-    const opt = decodeURIComponent(encodedOpt);
     q.selected = opt;
     q.correct = opt === q.answer;
     q.checked = true;
@@ -887,27 +929,28 @@ function generateQuizSet(ep) {
 }
 
 function renderClickableText(text) {
-    const encodedExample = encodeURIComponent(text);
     return text.split(/(\s+)/).map(tok => {
         if (!tok || /^\s+$/.test(tok)) return escapeHtml(tok);
         const norm = normalizeWord(tok);
         if (!norm) return escapeHtml(tok);
         const isSaved = !!unknownWords[norm];
-        return `<span class="clickable-word ${isSaved ? 'saved' : ''}" onclick="event.stopPropagation(); toggleUnknownWord('${encodeURIComponent(norm)}', '${encodedExample}')" title="點一下：加入或移除「不懂的單字」清單">${escapeHtml(tok)}</span>`;
+        return `<span class="clickable-word ${isSaved ? 'saved' : ''}" onclick="event.stopPropagation(); toggleUnknownWord('${jsAttr(norm)}', '${jsAttr(text)}')" title="點一下：加入或移除「不懂的單字」清單">${escapeHtml(tok)}</span>`;
     }).join('');
 }
 
-function toggleUnknownWord(encodedWord, encodedExample) {
-    const norm = decodeURIComponent(encodedWord);
+function toggleUnknownWord(norm, example) {
     if (!norm) return;
     if (unknownWords[norm]) {
         delete unknownWords[norm];
     } else {
-        unknownWords[norm] = { word: norm, example: encodedExample ? decodeURIComponent(encodedExample) : '', addedAt: Date.now() };
+        unknownWords[norm] = { word: norm, example: example || '', addedAt: Date.now() };
     }
     saveUnknownWords();
     const modeContent = document.getElementById('modeContent');
-    if (modeContent && currentMode === 'quiz') renderQuiz(modeContent, getEpisode(currentEpisodeId));
+    if (!modeContent) return;
+    const ep = getEpisode(currentEpisodeId);
+    if (currentMode === 'quiz') renderQuiz(modeContent, ep);
+    else if (currentMode === 'cloze') renderCloze(modeContent, ep);
 }
 
 function renderSavedWordsPanel() {
@@ -920,7 +963,7 @@ function renderSavedWordsPanel() {
     }
     return `<div class="card saved-words-panel">
         <h4>📝 我的不懂單字（${words.length}）</h4>
-        ${words.map(w => `<span class="saved-word-chip">${escapeHtml(w.word)} <button onclick="toggleUnknownWord('${encodeURIComponent(w.word)}')" title="移除">✕</button></span>`).join('')}
+        ${words.map(w => `<span class="saved-word-chip">${escapeHtml(w.word)} <button onclick="toggleUnknownWord('${jsAttr(w.word)}')" title="移除">✕</button></span>`).join('')}
     </div>`;
 }
 
@@ -960,7 +1003,7 @@ function renderQuiz(container, ep) {
             else if (opt === quizState.selected && opt !== q.correct) cls = 'selected-incorrect';
         }
         const optContent = q.type === 'next' ? renderClickableText(opt) : escapeHtml(opt);
-        html += `<button class="quiz-opt ${cls}" ${quizState.answered ? 'disabled' : ''} onclick="answerQuiz('${encodeURIComponent(opt)}')">${optContent}</button>`;
+        html += `<button class="quiz-opt ${cls}" ${quizState.answered ? 'disabled' : ''} onclick="answerQuiz('${jsAttr(opt)}')">${optContent}</button>`;
     });
     html += `</div>`;
     if (quizState.answered) {
@@ -971,9 +1014,8 @@ function renderQuiz(container, ep) {
     container.innerHTML = html;
 }
 
-function answerQuiz(encodedOpt) {
+function answerQuiz(opt) {
     if (quizState.answered) return;
-    const opt = decodeURIComponent(encodedOpt);
     const q = quizState.questions[quizState.index];
     quizState.answered = true;
     quizState.selected = opt;
