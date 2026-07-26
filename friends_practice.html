@@ -149,6 +149,22 @@
         background: #fffdf9;
     }
     .cloze-q .speaker { font-weight: 700; color: var(--primary); font-size: 13px; margin-bottom: 4px; }
+    .cloze-q-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .btn-icon-play {
+        border: 2px solid var(--border);
+        background: #fff;
+        color: var(--primary);
+        border-radius: 50%;
+        width: 30px;
+        height: 30px;
+        font-size: 14px;
+        cursor: pointer;
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .btn-icon-play:hover { border-color: var(--primary); }
     .cloze-q .sentence { font-size: 15px; line-height: 1.6; }
     .cloze-q input.blank-input {
         width: 110px;
@@ -202,7 +218,6 @@
     .flip-face .example { font-size: 13px; color: var(--muted); }
     .flash-controls { display: flex; justify-content: center; gap: 10px; margin-bottom: 8px; }
     .flash-progress { text-align: center; color: var(--muted); font-size: 13px; margin-bottom: 10px; }
-    .quiz-question { font-size: 16px; margin-bottom: 14px; line-height: 1.6; }
     .quiz-options { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
     .quiz-opt {
         text-align: left;
@@ -218,10 +233,6 @@
     .quiz-opt.selected-incorrect { border-color: var(--bad); background: #fdecec; }
     .quiz-opt.reveal-correct { border-color: var(--good); background: #eafbf2; }
     .quiz-opt[disabled] { cursor: default; opacity: 0.9; }
-    .quiz-context { margin-bottom: 12px; padding: 10px 12px; background: #f6f3ed; border-radius: 8px; border: 1px dashed var(--border); }
-    .quiz-context-line { font-size: 14px; line-height: 1.6; color: var(--muted); margin-bottom: 4px; }
-    .quiz-context-line:last-child { margin-bottom: 0; }
-    .quiz-context-line .speaker { font-weight: 700; color: var(--primary); }
     .cloze-context { margin-bottom: 10px; padding: 8px 10px; background: #f6f3ed; border-radius: 8px; border: 1px dashed var(--border); }
     .cloze-context-line { font-size: 13px; line-height: 1.6; color: var(--muted); margin-bottom: 3px; }
     .cloze-context-line:last-child { margin-bottom: 0; }
@@ -430,7 +441,6 @@ let editingEpisodeId = null;
 
 // ephemeral practice session state
 let clozeState = { questions: [], score: 0, answered: 0 };
-let quizState = { questions: [], index: 0, score: 0, answered: false };
 let flashState = { cards: [], index: 0, flipped: false };
 let listenState = { rate: 1, voiceURI: '', dictationMode: false, playingIndex: -1, dictationAnswers: {} };
 
@@ -511,7 +521,6 @@ function goToView(view, episodeId) {
     if (view === 'practice') {
         currentMode = 'cloze';
         clozeState = { questions: [], score: 0, answered: 0 };
-        quizState = { questions: [], index: 0, score: 0, answered: false };
         flashState = { cards: [], index: 0, flipped: false };
         listenState = { rate: 1, voiceURI: '', dictationMode: false, playingIndex: -1, dictationAnswers: {} };
     }
@@ -654,7 +663,6 @@ function renderPractice(app) {
     <div class="mode-tabs">
         <button class="mode-btn ${currentMode === 'cloze' ? 'active' : ''}" onclick="switchMode('cloze')">✏️ Cloze</button>
         <button class="mode-btn ${currentMode === 'flash' ? 'active' : ''}" onclick="switchMode('flash')">🗂️ Flashcards</button>
-        <button class="mode-btn ${currentMode === 'quiz' ? 'active' : ''}" onclick="switchMode('quiz')">❓ Quiz</button>
         <button class="mode-btn ${currentMode === 'listen' ? 'active' : ''}" onclick="switchMode('listen')">🔊 Listening</button>
     </div>
     <div id="modeContent"></div>`;
@@ -663,7 +671,6 @@ function renderPractice(app) {
     const modeContent = document.getElementById('modeContent');
     if (currentMode === 'cloze') renderCloze(modeContent, ep);
     else if (currentMode === 'flash') renderFlashcards(modeContent, ep);
-    else if (currentMode === 'quiz') renderQuiz(modeContent, ep);
     else if (currentMode === 'listen') renderListening(modeContent, ep);
 }
 
@@ -726,7 +733,10 @@ function renderCloze(container, ep) {
     clozeState.questions.forEach((q, i) => {
         html += `<div class="cloze-q">
             ${renderClozeContext(q.context)}
-            <div class="speaker">${escapeHtml(q.speaker)}</div>
+            <div class="cloze-q-header">
+                <div class="speaker">${escapeHtml(q.speaker)}</div>
+                <button class="btn-icon-play" onclick="playClozeSentence(${i})" title="播放這句話（空格不會唸出來）">🔊</button>
+            </div>
             <div class="sentence">${renderClickableText(q.sentence)}</div>
             <div class="quiz-options" style="margin-top:10px;">`;
         q.options.forEach(opt => {
@@ -766,6 +776,14 @@ function checkClozeAnswer(i, opt) {
 function regenerateCloze() {
     generateClozeSet(getEpisode(currentEpisodeId));
     render();
+}
+
+function playClozeSentence(i) {
+    const q = clozeState.questions[i];
+    if (!q) return;
+    // Replace the blank with a brief pause instead of speaking it (or the word "blank").
+    const spoken = q.sentence.replace('_____', ',').replace(/\s+/g, ' ').trim();
+    speakText(spoken);
 }
 
 // ============================= Flashcards mode =============================
@@ -879,55 +897,7 @@ function markCard(status) {
     nextCard();
 }
 
-// ============================= Quiz mode =============================
-function makeWhoSaidQuestion(ep, mainSpeakers) {
-    const eligible = ep.dialogue.filter(d => mainSpeakers.includes(d.speaker) && cleanText(d.text).split(/\s+/).length >= 4);
-    if (eligible.length === 0) return null;
-    const line = eligible[Math.floor(Math.random() * eligible.length)];
-    const idx = ep.dialogue.indexOf(line);
-    const correct = line.speaker;
-    const distractors = sample(mainSpeakers.filter(s => s !== correct), Math.min(3, mainSpeakers.length - 1));
-    const options = shuffle([correct, ...distractors]);
-    const contextStart = Math.max(0, idx - 2);
-    const context = ep.dialogue.slice(contextStart, idx).map(d => ({ speaker: d.speaker, text: cleanText(d.text) }));
-    return { type: 'who', context, quoted: cleanText(line.text), options, correct };
-}
-
-function makeNextLineQuestion(ep) {
-    if (ep.dialogue.length < 5) return null;
-    const i = Math.floor(Math.random() * (ep.dialogue.length - 1));
-    const correct = cleanText(ep.dialogue[i + 1].text);
-    if (!correct) return null;
-    const otherIdx = sample(
-        ep.dialogue.map((_, idx) => idx).filter(idx => idx !== i && idx !== i + 1),
-        3
-    );
-    const distractors = otherIdx.map(idx => cleanText(ep.dialogue[idx].text)).filter(t => t && t !== correct);
-    if (distractors.length < 2) return null;
-    const options = shuffle([correct, ...distractors.slice(0, 3)]);
-    const contextStart = Math.max(0, i - 2);
-    const context = ep.dialogue.slice(contextStart, i + 1).map(d => ({ speaker: d.speaker, text: cleanText(d.text) }));
-    return {
-        type: 'next',
-        context,
-        prompt: 'What comes next?',
-        options, correct
-    };
-}
-
-function generateQuizSet(ep) {
-    const mainSpeakers = Object.keys(ep.speakerCounts).filter(s => ep.speakerCounts[s] >= 3);
-    const questions = [];
-    let attempts = 0;
-    while (questions.length < 16 && attempts < 150) {
-        attempts++;
-        const useWho = mainSpeakers.length >= 2 && Math.random() < 0.5;
-        const q = useWho ? makeWhoSaidQuestion(ep, mainSpeakers) : makeNextLineQuestion(ep);
-        if (q) questions.push(q);
-    }
-    quizState = { questions, index: 0, score: 0, answered: false };
-}
-
+// ============================= Saved vocabulary (shared by Cloze/Flashcards) =============================
 function renderClickableText(text) {
     return text.split(/(\s+)/).map(tok => {
         if (!tok || /^\s+$/.test(tok)) return escapeHtml(tok);
@@ -943,96 +913,37 @@ function toggleUnknownWord(norm, example) {
     if (unknownWords[norm]) {
         delete unknownWords[norm];
     } else {
-        unknownWords[norm] = { word: norm, example: example || '', addedAt: Date.now() };
+        const ep = getEpisode(currentEpisodeId);
+        unknownWords[norm] = {
+            word: norm,
+            example: example || '',
+            episodeId: ep ? ep.id : null,
+            episodeTitle: ep ? (ep.title || '(untitled)') : '',
+            episodeTag: ep ? `S${ep.season}E${ep.episode}` : '',
+            addedAt: Date.now()
+        };
     }
     saveUnknownWords();
     const modeContent = document.getElementById('modeContent');
     if (!modeContent) return;
-    const ep = getEpisode(currentEpisodeId);
-    if (currentMode === 'quiz') renderQuiz(modeContent, ep);
-    else if (currentMode === 'cloze') renderCloze(modeContent, ep);
+    if (currentMode === 'cloze') renderCloze(modeContent, getEpisode(currentEpisodeId));
 }
 
 function renderSavedWordsPanel() {
-    const words = Object.values(unknownWords).sort((a, b) => b.addedAt - a.addedAt);
+    const words = Object.values(unknownWords)
+        .filter(w => w.episodeId === currentEpisodeId)
+        .sort((a, b) => b.addedAt - a.addedAt);
     if (words.length === 0) {
         return `<div class="card saved-words-panel">
-            <h4>📝 我的不懂單字（0）</h4>
-            <div class="small-note">在題目或選項的英文句子中，點一下看不懂的單字，就會存到這裡，之後也會出現在單字卡模式。</div>
+            <h4>📝 我的不懂單字（這一集）</h4>
+            <div class="small-note">在句子或選項中，點一下看不懂的單字，就會存到這裡，也會出現在單字卡和 📔 生字本。</div>
         </div>`;
     }
     return `<div class="card saved-words-panel">
-        <h4>📝 我的不懂單字（${words.length}）</h4>
+        <h4>📝 我的不懂單字（這一集 · ${words.length}）</h4>
         ${words.map(w => `<span class="saved-word-chip">${escapeHtml(w.word)} <button onclick="toggleUnknownWord('${jsAttr(w.word)}')" title="移除">✕</button></span>`).join('')}
+        <div class="small-note" style="margin-top:8px;">前往 <strong>📔 生字本</strong> 可以看到所有集數存的單字與解釋。</div>
     </div>`;
-}
-
-function renderQuizContext(context) {
-    if (!context || context.length === 0) return '';
-    return `<div class="quiz-context">${context.map(d =>
-        `<div class="quiz-context-line"><span class="speaker">${escapeHtml(d.speaker)}:</span> "${renderClickableText(d.text)}"</div>`
-    ).join('')}</div>`;
-}
-
-function renderQuiz(container, ep) {
-    if (quizState.questions.length === 0) generateQuizSet(ep);
-    if (quizState.questions.length === 0) {
-        container.innerHTML = `<div class="card empty-state">Not enough dialogue in this episode to build a quiz yet.</div>`;
-        return;
-    }
-    if (quizState.index >= quizState.questions.length) {
-        container.innerHTML = `<div class="card empty-state">
-            <p>Quiz complete! Score: ${quizState.score} / ${quizState.questions.length}</p>
-            <button class="btn btn-primary" onclick="regenerateQuiz()">🔄 Try Again</button>
-        </div>` + renderSavedWordsPanel();
-        return;
-    }
-    const q = quizState.questions[quizState.index];
-    const questionHtml = q.type === 'who'
-        ? `<div class="quiz-question">Who said: "${renderClickableText(q.quoted)}"</div>`
-        : `<div class="quiz-question">${escapeHtml(q.prompt)}</div>`;
-    let html = `<div class="card">
-        <div class="score-badge">Question ${quizState.index + 1} / ${quizState.questions.length} &middot; Score: ${quizState.score}</div>
-        ${renderQuizContext(q.context)}
-        ${questionHtml}
-        <div class="quiz-options">`;
-    q.options.forEach((opt, i) => {
-        let cls = '';
-        if (quizState.answered) {
-            if (opt === q.correct) cls = 'reveal-correct';
-            else if (opt === quizState.selected && opt !== q.correct) cls = 'selected-incorrect';
-        }
-        const optContent = q.type === 'next' ? renderClickableText(opt) : escapeHtml(opt);
-        html += `<button class="quiz-opt ${cls}" ${quizState.answered ? 'disabled' : ''} onclick="answerQuiz('${jsAttr(opt)}')">${optContent}</button>`;
-    });
-    html += `</div>`;
-    if (quizState.answered) {
-        html += `<button class="btn btn-primary" onclick="nextQuizQuestion()">${quizState.index + 1 < quizState.questions.length ? 'Next Question →' : 'See Results'}</button>`;
-    }
-    html += `</div>`;
-    html += renderSavedWordsPanel();
-    container.innerHTML = html;
-}
-
-function answerQuiz(opt) {
-    if (quizState.answered) return;
-    const q = quizState.questions[quizState.index];
-    quizState.answered = true;
-    quizState.selected = opt;
-    if (opt === q.correct) quizState.score++;
-    renderQuiz(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
-}
-
-function nextQuizQuestion() {
-    quizState.index++;
-    quizState.answered = false;
-    quizState.selected = null;
-    renderQuiz(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
-}
-
-function regenerateQuiz() {
-    generateQuizSet(getEpisode(currentEpisodeId));
-    render();
 }
 
 // ============================= Listening mode =============================
