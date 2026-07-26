@@ -502,11 +502,20 @@ function normalizeWord(w) { return w.replace(/[^A-Za-z']/g, '').toLowerCase(); }
 function parseScript(raw) {
     const lines = raw.split(/\r?\n/);
     const dialogue = [];
+    const sceneBreaks = [];
     let last = null;
     for (const rawLine of lines) {
         const line = rawLine.trim();
         if (!line) { last = null; continue; }
-        if (/^[\[\(]/.test(line)) { last = null; continue; }
+        if (/^[\[\(]/.test(line)) {
+            // Scene marker line (e.g. "[Scene: Central Perk]") — record where the new scene starts,
+            // but don't add a duplicate break if nothing has been added since the last one.
+            if (dialogue.length > 0 && sceneBreaks[sceneBreaks.length - 1] !== dialogue.length) {
+                sceneBreaks.push(dialogue.length);
+            }
+            last = null;
+            continue;
+        }
         const m = line.match(/^([A-Z][A-Za-z0-9 .'&-]{0,35}):\s*(.+)$/);
         if (m) {
             const entry = { speaker: m[1].trim(), text: m[2].trim() };
@@ -516,7 +525,7 @@ function parseScript(raw) {
             last.text += ' ' + line;
         }
     }
-    return dialogue;
+    return { dialogue, sceneBreaks };
 }
 
 function analyzeEpisode(dialogue) {
@@ -659,7 +668,7 @@ function saveEpisodeForm(editId) {
 
     if (!raw.trim()) { alert('Please paste the script text.'); return; }
 
-    const dialogue = parseScript(raw);
+    const { dialogue, sceneBreaks } = parseScript(raw);
     if (dialogue.length === 0) {
         alert("Couldn't find any lines in the format 'Speaker: text'. Please check the pasted script.");
         return;
@@ -669,10 +678,10 @@ function saveEpisodeForm(editId) {
     if (editId) {
         const ep = getEpisode(editId);
         ep.season = season; ep.episode = episode; ep.title = title;
-        ep.raw = raw; ep.dialogue = dialogue; ep.speakerCounts = speakerCounts; ep.vocab = vocab;
+        ep.raw = raw; ep.dialogue = dialogue; ep.speakerCounts = speakerCounts; ep.vocab = vocab; ep.sceneBreaks = sceneBreaks;
     } else {
         episodes.push({
-            id: Date.now(), season, episode, title, raw, dialogue, speakerCounts, vocab
+            id: Date.now(), season, episode, title, raw, dialogue, speakerCounts, vocab, sceneBreaks
         });
     }
     saveEpisodes();
@@ -987,21 +996,54 @@ function renderSavedWordsPanel() {
 }
 
 // ============================= Reading comprehension mode (2-3 passages x 5 questions) =============================
+function getSceneSegments(ep) {
+    const total = ep.dialogue.length;
+    const breaks = (ep.sceneBreaks || []).filter(b => b > 0 && b < total);
+    const uniqueSorted = Array.from(new Set(breaks)).sort((a, b) => a - b);
+    if (uniqueSorted.length === 0) return null;
+    const bounds = [0, ...uniqueSorted, total];
+    const segments = [];
+    for (let i = 0; i < bounds.length - 1; i++) {
+        if (bounds[i] < bounds[i + 1]) segments.push([bounds[i], bounds[i + 1]]);
+    }
+    return segments;
+}
+
+function groupSegmentsIntoPassages(segments, maxPassages) {
+    if (segments.length <= maxPassages) return segments.slice();
+    const perGroup = Math.ceil(segments.length / maxPassages);
+    const groups = [];
+    for (let i = 0; i < segments.length; i += perGroup) {
+        const groupSegs = segments.slice(i, i + perGroup);
+        groups.push([groupSegs[0][0], groupSegs[groupSegs.length - 1][1]]);
+    }
+    return groups;
+}
+
 function splitIntoPassages(ep) {
     const total = ep.dialogue.length;
-    let count = 3;
-    if (total < 30) count = 2;
-    if (total < 12) count = 1;
-    count = Math.max(1, Math.min(3, count));
-    const chunkSize = Math.ceil(total / count);
-    const passages = [];
-    for (let i = 0; i < count; i++) {
-        const start = i * chunkSize;
-        const end = Math.min(total, start + chunkSize);
-        if (start >= end) continue;
-        passages.push(ep.dialogue.slice(start, end));
+    const sceneSegments = getSceneSegments(ep);
+    let ranges;
+    if (sceneSegments && sceneSegments.length > 0) {
+        // Split by scene: each scene stays whole. If there are more than 3 scenes,
+        // group consecutive whole scenes together so we still end up with 2-3 passages.
+        const maxPassages = sceneSegments.length === 1 ? 1 : (sceneSegments.length === 2 ? 2 : 3);
+        ranges = groupSegmentsIntoPassages(sceneSegments, maxPassages);
+    } else {
+        // No scene markers found in the pasted script — fall back to splitting by line count.
+        let count = 3;
+        if (total < 30) count = 2;
+        if (total < 12) count = 1;
+        count = Math.max(1, Math.min(3, count));
+        const chunkSize = Math.ceil(total / count);
+        ranges = [];
+        for (let i = 0; i < count; i++) {
+            const start = i * chunkSize;
+            const end = Math.min(total, start + chunkSize);
+            if (start < end) ranges.push([start, end]);
+        }
     }
-    return passages;
+    return ranges.map(([start, end]) => ep.dialogue.slice(start, end));
 }
 
 function makeReadingWhoQuestion(lines, mainSpeakers) {
