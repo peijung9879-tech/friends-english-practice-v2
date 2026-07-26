@@ -1083,13 +1083,12 @@ function renderReading(container, ep) {
     let html = `<div class="card reading-passage">
         <div class="flex-row" style="justify-content:space-between;align-items:center;margin-bottom:8px;">
             <span class="score-badge">📖 文章 ${readState.currentPassageIndex + 1} / ${readState.passages.length}</span>
-            <button class="btn-icon-play" onclick="playPassage(${readState.currentPassageIndex})" title="播放整篇文章">🔊</button>
+            <button class="btn btn-accent" onclick="playPassage(${readState.currentPassageIndex})" title="從頭到尾一次唸完整篇">🔊 播放整篇</button>
         </div>
         <div class="reading-lines">`;
     passage.lines.forEach(d => {
         html += `<div class="reading-line">
             <span class="line-text"><span class="speaker">${escapeHtml(d.speaker)}:</span> "${renderClickableText(d.text)}"</span>
-            <button class="btn-icon-play-sm" onclick="playContextLine('${jsAttr(d.text)}')" title="播放這句話">🔊</button>
         </div>`;
     });
     html += `</div></div>`;
