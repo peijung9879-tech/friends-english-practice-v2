@@ -225,6 +225,8 @@
     .reading-line .line-text { flex: 1; }
     .reading-line:last-child { margin-bottom: 0; }
     .reading-line .speaker { font-weight: 700; color: var(--primary); }
+    .reading-line.reading-line-active { background: #fff3cd; border-radius: 6px; padding: 3px 6px; margin: -3px -6px 6px -6px; }
+    .reading-line.reading-line-active .line-text { font-weight: 600; }
     .quiz-opt {
         text-align: left;
         border: 2px solid var(--border);
@@ -465,6 +467,7 @@ let editingEpisodeId = null;
 // ephemeral practice session state
 let clozeState = { questions: [], score: 0, answered: 0 };
 let readState = { passages: [], currentPassageIndex: 0, currentQuestionIndex: 0, score: 0 };
+let readingPlayback = { playing: false, paused: false, passageIndex: -1, lineIndex: -1 };
 let flashState = { cards: [], index: 0, flipped: false };
 let listenState = { rate: 1, voiceURI: '', dictationMode: false, playingIndex: -1, dictationAnswers: {} };
 
@@ -546,6 +549,7 @@ function goToView(view, episodeId) {
         currentMode = 'cloze';
         clozeState = { questions: [], score: 0, answered: 0 };
         readState = { passages: [], currentPassageIndex: 0, currentQuestionIndex: 0, score: 0 };
+        readingPlayback = { playing: false, paused: false, passageIndex: -1, lineIndex: -1 };
         flashState = { cards: [], index: 0, flipped: false };
         listenState = { rate: 1, voiceURI: '', dictationMode: false, playingIndex: -1, dictationAnswers: {} };
     }
@@ -702,6 +706,7 @@ function renderPractice(app) {
 }
 
 function switchMode(mode) {
+    if (currentMode === 'read' && mode !== 'read') stopPassagePlayback();
     currentMode = mode;
     render();
 }
@@ -1048,17 +1053,46 @@ function generateReadingSet(ep) {
     readState = { passages, currentPassageIndex: 0, currentQuestionIndex: 0, score: 0 };
 }
 
-function playPassage(passageIndex) {
-    const passage = readState.passages[passageIndex];
-    if (!passage) return;
-    let idx = 0;
-    function playNext() {
-        if (idx >= passage.lines.length) return;
-        const line = passage.lines[idx];
-        idx++;
-        speakText(line.text, playNext);
+function togglePassagePlayback(passageIndex) {
+    if (!window.speechSynthesis) return;
+    if (readingPlayback.playing && readingPlayback.passageIndex === passageIndex) {
+        if (readingPlayback.paused) {
+            speechSynthesis.resume();
+            readingPlayback.paused = false;
+        } else {
+            speechSynthesis.pause();
+            readingPlayback.paused = true;
+        }
+        renderReading(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+        return;
     }
-    playNext();
+    speechSynthesis.cancel();
+    readingPlayback = { playing: true, paused: false, passageIndex, lineIndex: -1 };
+    playPassageLine(passageIndex, 0);
+}
+
+function playPassageLine(passageIndex, lineIndex) {
+    const passage = readState.passages[passageIndex];
+    if (!passage || lineIndex >= passage.lines.length) {
+        readingPlayback = { playing: false, paused: false, passageIndex: -1, lineIndex: -1 };
+        renderReading(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+        return;
+    }
+    readingPlayback.lineIndex = lineIndex;
+    renderReading(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+    const line = passage.lines[lineIndex];
+    speakText(line.text, () => {
+        if (readingPlayback.playing && readingPlayback.passageIndex === passageIndex) {
+            playPassageLine(passageIndex, lineIndex + 1);
+        }
+    });
+}
+
+function stopPassagePlayback() {
+    if (window.speechSynthesis) speechSynthesis.cancel();
+    readingPlayback = { playing: false, paused: false, passageIndex: -1, lineIndex: -1 };
+    const modeContent = document.getElementById('modeContent');
+    if (modeContent && currentMode === 'read') renderReading(modeContent, getEpisode(currentEpisodeId));
 }
 
 function renderReading(container, ep) {
@@ -1080,14 +1114,24 @@ function renderReading(container, ep) {
     const answeredInPassage = passage.questions.filter(x => x.checked).length;
     const correctInPassage = passage.questions.filter(x => x.isCorrect).length;
 
+    const isThisPlaying = readingPlayback.playing && readingPlayback.passageIndex === readState.currentPassageIndex;
+    const playBtnLabel = isThisPlaying ? (readingPlayback.paused ? '▶️ 繼續播放' : '⏸ 暫停') : '🔊 播放整篇';
+
     let html = `<div class="card reading-passage">
-        <div class="flex-row" style="justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div class="flex-row" style="justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
             <span class="score-badge">📖 文章 ${readState.currentPassageIndex + 1} / ${readState.passages.length}</span>
-            <button class="btn btn-accent" onclick="playPassage(${readState.currentPassageIndex})" title="從頭到尾一次唸完整篇">🔊 播放整篇</button>
+            <div class="flex-row" style="align-items:center;gap:8px;flex-wrap:wrap;">
+                <button class="btn btn-accent" onclick="togglePassagePlayback(${readState.currentPassageIndex})" title="從頭播放，可暫停/繼續">${playBtnLabel}</button>
+                ${isThisPlaying ? `<button class="btn" onclick="stopPassagePlayback()" title="停止播放">⏹ 停止</button>` : ''}
+                <span class="small-note">語速</span>
+                <input type="range" min="0.5" max="1.5" step="0.1" value="${listenState.rate}" oninput="listenState.rate=parseFloat(this.value); document.getElementById('readRateLabel').textContent=this.value+'x'" style="width:100px;">
+                <span id="readRateLabel" class="small-note">${listenState.rate}x</span>
+            </div>
         </div>
         <div class="reading-lines">`;
-    passage.lines.forEach(d => {
-        html += `<div class="reading-line">
+    passage.lines.forEach((d, li) => {
+        const isActiveLine = isThisPlaying && readingPlayback.lineIndex === li;
+        html += `<div class="reading-line ${isActiveLine ? 'reading-line-active' : ''}">
             <span class="line-text"><span class="speaker">${escapeHtml(d.speaker)}:</span> "${renderClickableText(d.text)}"</span>
         </div>`;
     });
@@ -1138,6 +1182,7 @@ function nextReadingQuestion() {
     if (readState.currentQuestionIndex + 1 < passage.questions.length) {
         readState.currentQuestionIndex++;
     } else {
+        stopPassagePlayback();
         readState.currentPassageIndex++;
         readState.currentQuestionIndex = 0;
     }
@@ -1145,6 +1190,7 @@ function nextReadingQuestion() {
 }
 
 function regenerateReading() {
+    stopPassagePlayback();
     generateReadingSet(getEpisode(currentEpisodeId));
     render();
 }
