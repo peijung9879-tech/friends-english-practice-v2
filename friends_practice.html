@@ -218,6 +218,36 @@
     .quiz-opt.selected-incorrect { border-color: var(--bad); background: #fdecec; }
     .quiz-opt.reveal-correct { border-color: var(--good); background: #eafbf2; }
     .quiz-opt[disabled] { cursor: default; opacity: 0.9; }
+    .quiz-context { margin-bottom: 12px; padding: 10px 12px; background: #f6f3ed; border-radius: 8px; border: 1px dashed var(--border); }
+    .quiz-context-line { font-size: 14px; line-height: 1.6; color: var(--muted); margin-bottom: 4px; }
+    .quiz-context-line:last-child { margin-bottom: 0; }
+    .quiz-context-line .speaker { font-weight: 700; color: var(--primary); }
+    .clickable-word { cursor: pointer; border-bottom: 2px dotted var(--primary); border-radius: 3px; padding: 0 1px; }
+    .clickable-word:hover { background: #f1eef8; }
+    .clickable-word.saved { background: #fff3cd; border-bottom-color: var(--accent); font-weight: 700; }
+    .saved-words-panel h4 { margin: 0 0 8px; font-size: 14px; color: var(--primary); }
+    .saved-word-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #fff3cd;
+        border: 1px solid var(--accent);
+        color: #7a5b00;
+        padding: 4px 6px 4px 10px;
+        border-radius: 14px;
+        font-size: 12px;
+        margin: 0 6px 6px 0;
+    }
+    .saved-word-chip button {
+        border: none;
+        background: transparent;
+        color: var(--bad);
+        cursor: pointer;
+        font-weight: 700;
+        font-size: 13px;
+        line-height: 1;
+        padding: 2px 4px;
+    }
     .listen-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
     .listen-toolbar > div { display: flex; align-items: center; gap: 6px; font-size: 13px; }
     .listen-line {
@@ -282,6 +312,8 @@ function loadEpisodes() { return JSON.parse(localStorage.getItem('friends_episod
 function saveEpisodes() { localStorage.setItem('friends_episodes', JSON.stringify(episodes)); pushToCloud(); }
 function loadVocabStatus() { return JSON.parse(localStorage.getItem('friends_vocab_status') || '{}'); }
 function saveVocabStatus() { localStorage.setItem('friends_vocab_status', JSON.stringify(vocabStatus)); pushToCloud(); }
+function loadUnknownWords() { return JSON.parse(localStorage.getItem('friends_unknown_words') || '{}'); }
+function saveUnknownWords() { localStorage.setItem('friends_unknown_words', JSON.stringify(unknownWords)); pushToCloud(); }
 function loadDictCache() { return JSON.parse(localStorage.getItem('friends_dict_cache') || '{}'); }
 function saveDictCache() { localStorage.setItem('friends_dict_cache', JSON.stringify(dictCache)); }
 
@@ -300,7 +332,8 @@ function pushToCloud() {
             body: new URLSearchParams({
                 action: 'save',
                 episodes: JSON.stringify(episodes),
-                vocabStatus: JSON.stringify(vocabStatus)
+                vocabStatus: JSON.stringify(vocabStatus),
+                unknownWords: JSON.stringify(unknownWords)
             })
         }).then(() => setSyncStatus('✅ 已同步到雲端 ' + new Date().toLocaleTimeString()))
           .catch(() => setSyncStatus('⚠️ 同步失敗，請檢查網址或網路'));
@@ -337,8 +370,10 @@ async function pullFromCloudNow() {
         const cloud = await cloudLoad(url);
         episodes = cloud.episodes || [];
         vocabStatus = cloud.vocabStatus || {};
+        unknownWords = cloud.unknownWords || {};
         localStorage.setItem('friends_episodes', JSON.stringify(episodes));
         localStorage.setItem('friends_vocab_status', JSON.stringify(vocabStatus));
+        localStorage.setItem('friends_unknown_words', JSON.stringify(unknownWords));
         setSyncStatus('✅ 已從雲端更新，' + new Date().toLocaleTimeString());
         goToView('library');
     } catch (err) {
@@ -367,6 +402,7 @@ function renderSyncSettings() {
 
 let episodes = loadEpisodes();
 let vocabStatus = loadVocabStatus();
+let unknownWords = loadUnknownWords();
 let dictCache = loadDictCache();
 
 let currentView = 'library';
@@ -715,7 +751,10 @@ async function fetchDefinition(word) {
 }
 
 function generateFlashSet(ep) {
-    flashState = { cards: ep.vocab.slice(0, 40), index: 0, flipped: false };
+    const saved = Object.values(unknownWords)
+        .filter(w => !ep.vocab.some(v => v.word === w.word))
+        .map(w => ({ word: w.word, count: 0, example: w.example || '' }));
+    flashState = { cards: [...saved, ...ep.vocab].slice(0, 40), index: 0, flipped: false };
 }
 
 function renderFlashcards(container, ep) {
@@ -737,7 +776,7 @@ function renderFlashcards(container, ep) {
                 <div class="flip-inner">
                     <div class="flip-face front">
                         <div class="word">${escapeHtml(card.word)}</div>
-                        <div class="small-note">seen ${card.count} time${card.count > 1 ? 's' : ''} &middot; ${status === 'known' ? '⭐ known' : 'tap to reveal'}</div>
+                        <div class="small-note">${card.count > 0 ? `seen ${card.count} time${card.count > 1 ? 's' : ''} &middot; ` : '📝 saved from quiz &middot; '}${status === 'known' ? '⭐ known' : 'tap to reveal'}</div>
                     </div>
                     <div class="flip-face back" id="cardBack">
                         <div class="small-note">Loading definition…</div>
@@ -765,14 +804,15 @@ async function loadCardBack(card) {
     if (!backEl) return;
     const info = await fetchDefinition(card.word);
     if (!backEl) return;
+    const exampleHtml = card.example ? `<div class="example">"${escapeHtml(card.example)}"</div>` : '';
     if (info && info.definition) {
         backEl.innerHTML = `
             <div class="pos">${escapeHtml(info.partOfSpeech || '')} ${info.phonetic ? escapeHtml(info.phonetic) : ''}</div>
             <div class="def">${escapeHtml(info.definition)}</div>
-            <div class="example">"${escapeHtml(card.example)}"</div>`;
+            ${exampleHtml}`;
     } else {
         backEl.innerHTML = `<div class="def">(No dictionary definition available — offline or word not found.)</div>
-            <div class="example">"${escapeHtml(card.example)}"</div>`;
+            ${exampleHtml}`;
     }
 }
 
@@ -802,10 +842,13 @@ function makeWhoSaidQuestion(ep, mainSpeakers) {
     const eligible = ep.dialogue.filter(d => mainSpeakers.includes(d.speaker) && cleanText(d.text).split(/\s+/).length >= 4);
     if (eligible.length === 0) return null;
     const line = eligible[Math.floor(Math.random() * eligible.length)];
+    const idx = ep.dialogue.indexOf(line);
     const correct = line.speaker;
     const distractors = sample(mainSpeakers.filter(s => s !== correct), Math.min(3, mainSpeakers.length - 1));
     const options = shuffle([correct, ...distractors]);
-    return { type: 'who', question: `Who said: "${cleanText(line.text)}"`, options, correct };
+    const contextStart = Math.max(0, idx - 2);
+    const context = ep.dialogue.slice(contextStart, idx).map(d => ({ speaker: d.speaker, text: cleanText(d.text) }));
+    return { type: 'who', context, quoted: cleanText(line.text), options, correct };
 }
 
 function makeNextLineQuestion(ep) {
@@ -820,9 +863,12 @@ function makeNextLineQuestion(ep) {
     const distractors = otherIdx.map(idx => cleanText(ep.dialogue[idx].text)).filter(t => t && t !== correct);
     if (distractors.length < 2) return null;
     const options = shuffle([correct, ...distractors.slice(0, 3)]);
+    const contextStart = Math.max(0, i - 2);
+    const context = ep.dialogue.slice(contextStart, i + 1).map(d => ({ speaker: d.speaker, text: cleanText(d.text) }));
     return {
         type: 'next',
-        question: `${ep.dialogue[i].speaker}: "${cleanText(ep.dialogue[i].text)}"<br>What comes next?`,
+        context,
+        prompt: 'What comes next?',
         options, correct
     };
 }
@@ -831,13 +877,58 @@ function generateQuizSet(ep) {
     const mainSpeakers = Object.keys(ep.speakerCounts).filter(s => ep.speakerCounts[s] >= 3);
     const questions = [];
     let attempts = 0;
-    while (questions.length < 8 && attempts < 60) {
+    while (questions.length < 16 && attempts < 150) {
         attempts++;
         const useWho = mainSpeakers.length >= 2 && Math.random() < 0.5;
         const q = useWho ? makeWhoSaidQuestion(ep, mainSpeakers) : makeNextLineQuestion(ep);
         if (q) questions.push(q);
     }
     quizState = { questions, index: 0, score: 0, answered: false };
+}
+
+function renderClickableText(text) {
+    const encodedExample = encodeURIComponent(text);
+    return text.split(/(\s+)/).map(tok => {
+        if (!tok || /^\s+$/.test(tok)) return escapeHtml(tok);
+        const norm = normalizeWord(tok);
+        if (!norm) return escapeHtml(tok);
+        const isSaved = !!unknownWords[norm];
+        return `<span class="clickable-word ${isSaved ? 'saved' : ''}" onclick="event.stopPropagation(); toggleUnknownWord('${encodeURIComponent(norm)}', '${encodedExample}')" title="點一下：加入或移除「不懂的單字」清單">${escapeHtml(tok)}</span>`;
+    }).join('');
+}
+
+function toggleUnknownWord(encodedWord, encodedExample) {
+    const norm = decodeURIComponent(encodedWord);
+    if (!norm) return;
+    if (unknownWords[norm]) {
+        delete unknownWords[norm];
+    } else {
+        unknownWords[norm] = { word: norm, example: encodedExample ? decodeURIComponent(encodedExample) : '', addedAt: Date.now() };
+    }
+    saveUnknownWords();
+    const modeContent = document.getElementById('modeContent');
+    if (modeContent && currentMode === 'quiz') renderQuiz(modeContent, getEpisode(currentEpisodeId));
+}
+
+function renderSavedWordsPanel() {
+    const words = Object.values(unknownWords).sort((a, b) => b.addedAt - a.addedAt);
+    if (words.length === 0) {
+        return `<div class="card saved-words-panel">
+            <h4>📝 我的不懂單字（0）</h4>
+            <div class="small-note">在題目或選項的英文句子中，點一下看不懂的單字，就會存到這裡，之後也會出現在單字卡模式。</div>
+        </div>`;
+    }
+    return `<div class="card saved-words-panel">
+        <h4>📝 我的不懂單字（${words.length}）</h4>
+        ${words.map(w => `<span class="saved-word-chip">${escapeHtml(w.word)} <button onclick="toggleUnknownWord('${encodeURIComponent(w.word)}')" title="移除">✕</button></span>`).join('')}
+    </div>`;
+}
+
+function renderQuizContext(context) {
+    if (!context || context.length === 0) return '';
+    return `<div class="quiz-context">${context.map(d =>
+        `<div class="quiz-context-line"><span class="speaker">${escapeHtml(d.speaker)}:</span> "${renderClickableText(d.text)}"</div>`
+    ).join('')}</div>`;
 }
 
 function renderQuiz(container, ep) {
@@ -850,13 +941,17 @@ function renderQuiz(container, ep) {
         container.innerHTML = `<div class="card empty-state">
             <p>Quiz complete! Score: ${quizState.score} / ${quizState.questions.length}</p>
             <button class="btn btn-primary" onclick="regenerateQuiz()">🔄 Try Again</button>
-        </div>`;
+        </div>` + renderSavedWordsPanel();
         return;
     }
     const q = quizState.questions[quizState.index];
+    const questionHtml = q.type === 'who'
+        ? `<div class="quiz-question">Who said: "${renderClickableText(q.quoted)}"</div>`
+        : `<div class="quiz-question">${escapeHtml(q.prompt)}</div>`;
     let html = `<div class="card">
         <div class="score-badge">Question ${quizState.index + 1} / ${quizState.questions.length} &middot; Score: ${quizState.score}</div>
-        <div class="quiz-question">${q.question}</div>
+        ${renderQuizContext(q.context)}
+        ${questionHtml}
         <div class="quiz-options">`;
     q.options.forEach((opt, i) => {
         let cls = '';
@@ -864,13 +959,15 @@ function renderQuiz(container, ep) {
             if (opt === q.correct) cls = 'reveal-correct';
             else if (opt === quizState.selected && opt !== q.correct) cls = 'selected-incorrect';
         }
-        html += `<button class="quiz-opt ${cls}" ${quizState.answered ? 'disabled' : ''} onclick="answerQuiz('${encodeURIComponent(opt)}')">${escapeHtml(opt)}</button>`;
+        const optContent = q.type === 'next' ? renderClickableText(opt) : escapeHtml(opt);
+        html += `<button class="quiz-opt ${cls}" ${quizState.answered ? 'disabled' : ''} onclick="answerQuiz('${encodeURIComponent(opt)}')">${optContent}</button>`;
     });
     html += `</div>`;
     if (quizState.answered) {
         html += `<button class="btn btn-primary" onclick="nextQuizQuestion()">${quizState.index + 1 < quizState.questions.length ? 'Next Question →' : 'See Results'}</button>`;
     }
     html += `</div>`;
+    html += renderSavedWordsPanel();
     container.innerHTML = html;
 }
 
@@ -1021,8 +1118,10 @@ async function init() {
             const cloud = await cloudLoad(url);
             episodes = cloud.episodes || episodes;
             vocabStatus = cloud.vocabStatus || vocabStatus;
+            unknownWords = cloud.unknownWords || unknownWords;
             localStorage.setItem('friends_episodes', JSON.stringify(episodes));
             localStorage.setItem('friends_vocab_status', JSON.stringify(vocabStatus));
+            localStorage.setItem('friends_unknown_words', JSON.stringify(unknownWords));
         } catch (err) {
             console.error('雲端同步失敗，改用本機資料', err);
         }
