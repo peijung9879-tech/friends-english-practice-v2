@@ -881,7 +881,8 @@ function renderCloze(container, ep) {
         return;
     }
     let html = `<div class="card">
-        <div class="flex-row" style="justify-content:space-between;margin-bottom:10px;">
+        ${renderVoiceToolbar({ onPlayAll: 'playAllClozeSentences()', playLabel: '全部播放（空格靜音）' })}
+        <div class="flex-row" style="justify-content:space-between;margin-bottom:10px;margin-top:10px;">
             <span class="score-badge">分數：${clozeState.score} / ${clozeState.answered}</span>
             <button class="btn btn-accent" onclick="regenerateCloze()">🔄 換一組</button>
         </div>`;
@@ -939,6 +940,17 @@ function playClozeSentence(i) {
     // Replace the blank with a brief pause instead of speaking it (or the word "blank").
     const spoken = q.sentence.replace('_____', ',').replace(/\s+/g, ' ').trim();
     speakText(spoken);
+}
+
+function playAllClozeSentences() {
+    let i = 0;
+    function playNext() {
+        if (i >= clozeState.questions.length) return;
+        const q = clozeState.questions[i];
+        const spoken = q.sentence.replace('_____', ',').replace(/\s+/g, ' ').trim();
+        speakText(spoken, () => { i++; playNext(); });
+    }
+    playNext();
 }
 
 // ============================= Flashcards mode =============================
@@ -1266,6 +1278,7 @@ function renderReading(container, ep) {
 
     const isThisPlaying = readingPlayback.playing && readingPlayback.passageIndex === readState.currentPassageIndex;
     const playBtnLabel = isThisPlaying ? (readingPlayback.paused ? '▶️ 繼續播放' : '⏸ 暫停') : '🔊 播放整篇';
+    const readingVoices = getEnglishVoices();
 
     let html = `<div class="card reading-passage">
         <div class="flex-row" style="justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
@@ -1276,6 +1289,11 @@ function renderReading(container, ep) {
                 <span class="small-note">語速</span>
                 <input type="range" min="0.5" max="1.5" step="0.1" value="${listenState.rate}" oninput="listenState.rate=parseFloat(this.value); document.getElementById('readRateLabel').textContent=this.value+'x'" style="width:100px;">
                 <span id="readRateLabel" class="small-note">${listenState.rate}x</span>
+                <span class="small-note">語音</span>
+                <select onchange="listenState.voiceURI=this.value" style="width:auto;">
+                    <option value="">預設</option>
+                    ${readingVoices.map(v => `<option value="${escapeHtml(v.voiceURI)}" ${listenState.voiceURI === v.voiceURI ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('')}
+                </select>
             </div>
         </div>
         <div class="reading-lines">`;
@@ -1350,27 +1368,41 @@ function getEnglishVoices() {
     return (window.speechSynthesis ? speechSynthesis.getVoices() : []).filter(v => v.lang && v.lang.toLowerCase().startsWith('en'));
 }
 
-function renderListening(container, ep) {
+// Shared voice control bar (Play All / Stop / Speed / Voice, optional dictation toggle),
+// reused everywhere text-to-speech is available so the controls look and work the same way.
+function renderVoiceToolbar(opts) {
+    opts = opts || {};
     const voices = getEnglishVoices();
-    let html = `<div class="card">
-        <div class="listen-toolbar">
-            <button class="btn btn-primary" onclick="playAllLines()">▶ 全部播放</button>
-            <button class="btn btn-secondary" onclick="stopPlayback()">⏹ 停止</button>
-            <div>
-                <label style="margin:0;">語速</label>
-                <input type="range" min="0.5" max="1.5" step="0.1" value="${listenState.rate}" oninput="listenState.rate=parseFloat(this.value)" style="width:100px;">
-            </div>
-            <div>
-                <label style="margin:0;">語音</label>
-                <select onchange="listenState.voiceURI=this.value" style="width:auto;">
-                    <option value="">預設</option>
-                    ${voices.map(v => `<option value="${escapeHtml(v.voiceURI)}" ${listenState.voiceURI === v.voiceURI ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('')}
-                </select>
-            </div>
-            <div>
-                <label style="margin:0;"><input type="checkbox" ${listenState.dictationMode ? 'checked' : ''} onchange="toggleDictationMode(this.checked)" style="width:auto;"> 聽寫練習（隱藏文字）</label>
-            </div>
+    const playAllHandler = opts.onPlayAll || 'playAllLines()';
+    const stopHandler = opts.onStop || 'stopPlayback()';
+    const playLabel = opts.playLabel || '全部播放';
+    let html = `<div class="listen-toolbar">
+        <button class="btn btn-primary" onclick="${playAllHandler}">▶ ${playLabel}</button>
+        <button class="btn btn-secondary" onclick="${stopHandler}">⏹ 停止</button>
+        <div>
+            <label style="margin:0;">語速</label>
+            <input type="range" min="0.5" max="1.5" step="0.1" value="${listenState.rate}" oninput="listenState.rate=parseFloat(this.value)" style="width:100px;">
+        </div>
+        <div>
+            <label style="margin:0;">語音</label>
+            <select onchange="listenState.voiceURI=this.value" style="width:auto;">
+                <option value="">預設</option>
+                ${voices.map(v => `<option value="${escapeHtml(v.voiceURI)}" ${listenState.voiceURI === v.voiceURI ? 'selected' : ''}>${escapeHtml(v.name)}</option>`).join('')}
+            </select>
         </div>`;
+    if (opts.showDictation) {
+        html += `<div>
+            <label style="margin:0;"><input type="checkbox" ${listenState.dictationMode ? 'checked' : ''} onchange="toggleDictationMode(this.checked)" style="width:auto;"> 聽寫練習（隱藏文字）</label>
+        </div>`;
+    }
+    html += `</div>`;
+    return html;
+}
+
+function renderListening(container, ep) {
+    let html = `<div class="card">
+        ${renderVoiceToolbar({ showDictation: true })}`;
+
 
     ep.dialogue.forEach((line, i) => {
         const clean = cleanText(line.text);
@@ -1466,10 +1498,8 @@ function renderOriginal(container, ep) {
         : [ep.dialogue];
 
     let html = `<div class="card">
-        <div class="flex-row" style="justify-content:space-between;align-items:center;margin-bottom:10px;">
-            <span class="score-badge">📄 原文全文</span>
-            <button class="btn btn-accent" onclick="playAllLines()">🔊 播放全部</button>
-        </div>`;
+        <span class="score-badge">📄 原文全文</span>
+        ${renderVoiceToolbar({})}`;
     groups.forEach(lines => {
         html += `<div class="reading-lines" style="margin-bottom:14px;">`;
         lines.forEach(d => {
