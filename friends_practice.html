@@ -514,6 +514,7 @@ let readState = { passages: [], currentPassageIndex: 0, currentQuestionIndex: 0,
 let readingPlayback = { playing: false, paused: false, passageIndex: -1, lineIndex: -1 };
 let flashState = { cards: [], index: 0, flipped: false };
 let listenState = { rate: 1, voiceURI: '', dictationMode: false, playingIndex: -1, dictationAnswers: {} };
+let wordBankState = { cards: [], index: 0, flipped: false };
 
 // ============================= Utilities =============================
 function escapeHtml(str) {
@@ -636,6 +637,7 @@ function goToView(view, episodeId) {
         readingPlayback = { playing: false, paused: false, passageIndex: -1, lineIndex: -1 };
         flashState = { cards: [], index: 0, flipped: false };
         listenState = { rate: 1, voiceURI: '', dictationMode: false, playingIndex: -1, dictationAnswers: {} };
+        wordBankState = { cards: [], index: 0, flipped: false };
     }
     render();
 }
@@ -804,6 +806,8 @@ function renderPractice(app) {
         <button class="mode-btn ${currentMode === 'flash' ? 'active' : ''}" onclick="switchMode('flash')">🗂️ 單字卡</button>
         <button class="mode-btn ${currentMode === 'read' ? 'active' : ''}" onclick="switchMode('read')">📖 閱讀測驗</button>
         <button class="mode-btn ${currentMode === 'listen' ? 'active' : ''}" onclick="switchMode('listen')">🔊 聽力練習</button>
+        <button class="mode-btn ${currentMode === 'original' ? 'active' : ''}" onclick="switchMode('original')">📄 原文</button>
+        <button class="mode-btn ${currentMode === 'wordbank' ? 'active' : ''}" onclick="switchMode('wordbank')">⭐ 單字庫</button>
     </div>
     <div id="modeContent"></div>`;
     app.innerHTML = inner;
@@ -813,6 +817,8 @@ function renderPractice(app) {
     else if (currentMode === 'flash') renderFlashcards(modeContent, ep);
     else if (currentMode === 'read') renderReading(modeContent, ep);
     else if (currentMode === 'listen') renderListening(modeContent, ep);
+    else if (currentMode === 'original') renderOriginal(modeContent, ep);
+    else if (currentMode === 'wordbank') renderWordBank(modeContent, ep);
 }
 
 function switchMode(mode) {
@@ -1077,6 +1083,7 @@ function toggleUnknownWord(norm, example) {
     if (!modeContent) return;
     if (currentMode === 'cloze') renderCloze(modeContent, getEpisode(currentEpisodeId));
     else if (currentMode === 'read') renderReading(modeContent, getEpisode(currentEpisodeId));
+    else if (currentMode === 'original') renderOriginal(modeContent, getEpisode(currentEpisodeId));
 }
 
 function renderSavedWordsPanel() {
@@ -1449,6 +1456,132 @@ function stopPlayback() {
     if (window.speechSynthesis) speechSynthesis.cancel();
     listenState.playingIndex = -1;
     render();
+}
+
+// ============================= Original text mode (plain, no blanks/highlights) =============================
+function renderOriginal(container, ep) {
+    const sceneSegments = getSceneSegments(ep);
+    const groups = (sceneSegments && sceneSegments.length > 0)
+        ? sceneSegments.map(([s, e]) => ep.dialogue.slice(s, e))
+        : [ep.dialogue];
+
+    let html = `<div class="card">
+        <div class="flex-row" style="justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <span class="score-badge">📄 原文全文</span>
+            <button class="btn btn-accent" onclick="playAllLines()">🔊 播放全部</button>
+        </div>`;
+    groups.forEach(lines => {
+        html += `<div class="reading-lines" style="margin-bottom:14px;">`;
+        lines.forEach(d => {
+            const clean = cleanText(d.text);
+            html += `<div class="reading-line">
+                <span class="line-text">${d.speaker ? `<span class="speaker">${escapeHtml(d.speaker)}:</span> ` : ''}${renderClickableText(clean)}</span>
+            </div>`;
+        });
+        html += `</div>`;
+    });
+    html += `</div>`;
+    html += `<div class="card small-note">💡 這裡顯示完整原文，沒有挖空、沒有標色，適合整篇閱讀。點一下看不懂的單字可以加進 ⭐ 單字庫。</div>`;
+    html += renderSavedWordsPanel();
+    container.innerHTML = html;
+}
+
+// ============================= Word bank mode (only explicitly marked/starred words) =============================
+function generateWordBankSet(ep) {
+    const words = Object.values(unknownWords)
+        .filter(w => w.episodeId === ep.id)
+        .map(w => ({ word: w.word, count: 0, example: w.example || '' }));
+    wordBankState = { cards: words, index: 0, flipped: false };
+}
+
+function renderWordBank(container, ep) {
+    if (wordBankState.cards.length === 0) generateWordBankSet(ep);
+    if (wordBankState.cards.length === 0) {
+        container.innerHTML = `<div class="card empty-state">
+            <p>目前這份教材還沒有標示（⭐）任何單字。</p>
+            <div class="small-note">到「✏️ 克漏字」「📖 閱讀測驗」或「📄 原文」裡，點一下看不懂的單字加上 ⭐，就會自動出現在這裡——單字庫不會自己額外生成其他單字。</div>
+        </div>`;
+        return;
+    }
+    if (wordBankState.index >= wordBankState.cards.length) wordBankState.index = 0;
+    const card = wordBankState.cards[wordBankState.index];
+    const status = vocabStatus[card.word] || 'new';
+    const knownCount = wordBankState.cards.filter(c => vocabStatus[c.word] === 'known').length;
+
+    let html = `<div class="card">
+        <div class="flash-progress">第 ${wordBankState.index + 1} / ${wordBankState.cards.length} 張 &middot; 已熟悉：${knownCount} / ${wordBankState.cards.length}</div>
+        <div class="flip-card-wrap">
+            <div class="flip-card ${wordBankState.flipped ? 'flipped' : ''}" onclick="flipWordBankCard()">
+                <div class="flip-inner">
+                    <div class="flip-face front">
+                        <div class="word">${escapeHtml(card.word)}</div>
+                        <div class="small-note">📝 已標示的單字 &middot; ${status === 'known' ? '⭐ 已熟悉' : '點一下翻面'}</div>
+                    </div>
+                    <div class="flip-face back" id="wordBankCardBack">
+                        <div class="small-note">載入字義中…</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="flash-controls">
+            <button class="btn btn-secondary" onclick="prevWordBankCard()">&larr; 上一張</button>
+            <button class="btn btn-danger" onclick="markWordBankCard('learning')">還在學</button>
+            <button class="btn btn-primary" onclick="markWordBankCard('known')">✓ 我知道了</button>
+            <button class="btn btn-secondary" onclick="nextWordBankCard()">下一張 &rarr;</button>
+        </div>
+        <div class="flex-row" style="justify-content:center;">
+            <button class="btn btn-danger" onclick="removeFromWordBank('${jsAttr(card.word)}')">🗑️ 從單字庫移除</button>
+        </div>
+    </div>`;
+    container.innerHTML = html;
+
+    if (wordBankState.flipped) loadWordBankCardBack(card);
+}
+
+async function loadWordBankCardBack(card) {
+    const backEl = document.getElementById('wordBankCardBack');
+    if (!backEl) return;
+    const info = await fetchDefinition(card.word);
+    if (!backEl) return;
+    const exampleHtml = card.example ? `<div class="example">"${escapeHtml(card.example)}"</div>` : '';
+    if (info && info.definition) {
+        backEl.innerHTML = `
+            <div class="pos">${escapeHtml(info.partOfSpeech || '')} ${info.phonetic ? escapeHtml(info.phonetic) : ''}</div>
+            <div class="def">${escapeHtml(info.definition)}</div>
+            ${exampleHtml}`;
+    } else {
+        backEl.innerHTML = `<div class="def">（找不到字典解釋——可能離線或查無此字）</div>${exampleHtml}`;
+    }
+}
+
+function flipWordBankCard() {
+    wordBankState.flipped = !wordBankState.flipped;
+    renderWordBank(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+}
+function nextWordBankCard() {
+    if (wordBankState.cards.length === 0) return;
+    wordBankState.index = (wordBankState.index + 1) % wordBankState.cards.length;
+    wordBankState.flipped = false;
+    renderWordBank(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+}
+function prevWordBankCard() {
+    if (wordBankState.cards.length === 0) return;
+    wordBankState.index = (wordBankState.index - 1 + wordBankState.cards.length) % wordBankState.cards.length;
+    wordBankState.flipped = false;
+    renderWordBank(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+}
+function markWordBankCard(status) {
+    if (wordBankState.cards.length === 0) return;
+    const card = wordBankState.cards[wordBankState.index];
+    vocabStatus[card.word] = status;
+    saveVocabStatus();
+    nextWordBankCard();
+}
+function removeFromWordBank(word) {
+    toggleUnknownWord(word);
+    generateWordBankSet(getEpisode(currentEpisodeId));
+    if (wordBankState.index >= wordBankState.cards.length) wordBankState.index = Math.max(0, wordBankState.cards.length - 1);
+    renderWordBank(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
 }
 
 // ============================= Init =============================
