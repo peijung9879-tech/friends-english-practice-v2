@@ -823,6 +823,12 @@ function renderPractice(app) {
 
 function switchMode(mode) {
     if (currentMode === 'read' && mode !== 'read') stopPassagePlayback();
+    // Always pull the latest starred-word list when opening the word bank, instead of
+    // relying on a cached copy from earlier in this practice session.
+    if (mode === 'wordbank') {
+        const ep = getEpisode(currentEpisodeId);
+        if (ep) generateWordBankSet(ep);
+    }
     currentMode = mode;
     render();
 }
