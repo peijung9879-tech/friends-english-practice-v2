@@ -410,7 +410,28 @@ function migrateEpisode(ep) {
             ? ('Season ' + ep.season) : '未分類';
     }
     if (ep.order === undefined) ep.order = ep.episode || 0;
+    if (ep.grammarPoints === undefined) ep.grammarPoints = [];
     return ep;
+}
+
+// Parse the optional "📐 文法重點" textarea: one grammar point per line,
+// pipe-separated as  name | correct example | wrong example (wrong example optional).
+// Blank lines and lines without at least a name+correct pair are skipped.
+function parseGrammarPoints(raw) {
+    if (!raw || !raw.trim()) return [];
+    return raw.split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => {
+            const parts = line.split('|').map(p => p.trim());
+            return { name: parts[0] || '', correct: parts[1] || '', wrong: parts[2] || '' };
+        })
+        .filter(gp => gp.name && gp.correct);
+}
+
+function grammarPointsToRaw(points) {
+    if (!points || points.length === 0) return '';
+    return points.map(gp => [gp.name, gp.correct, gp.wrong || ''].join(' | ')).join('\n');
 }
 
 // ============================= Cloud sync (Google Apps Script) =============================
@@ -515,6 +536,10 @@ let readingPlayback = { playing: false, paused: false, passageIndex: -1, lineInd
 let flashState = { cards: [], index: 0, flipped: false };
 let listenState = { rate: 1, voiceURI: '', dictationMode: false, playingIndex: -1, dictationAnswers: {} };
 let wordBankState = { cards: [], index: 0, flipped: false };
+// grammarState covers both practice views on the "📐 文法練習" tab:
+// - flip cards: index/flipped, like flashState
+// - a multiple-choice "which is correct" quiz built from grammar points that have a wrong example
+let grammarState = { view: 'cards', cards: [], index: 0, flipped: false, quiz: [], quizIndex: 0, quizScore: 0, quizAnswered: 0 };
 
 // ============================= Utilities =============================
 function escapeHtml(str) {
@@ -638,6 +663,7 @@ function goToView(view, episodeId) {
         flashState = { cards: [], index: 0, flipped: false };
         listenState = { rate: 1, voiceURI: '', dictationMode: false, playingIndex: -1, dictationAnswers: {} };
         wordBankState = { cards: [], index: 0, flipped: false };
+        grammarState = { view: 'cards', cards: [], index: 0, flipped: false, quiz: [], quizIndex: 0, quizScore: 0, quizAnswered: 0 };
     }
     render();
 }
@@ -752,6 +778,12 @@ function renderAddForm() {
             <p class="hint">${hint}</p>
             <textarea id="fScript" rows="14" placeholder="${placeholder}">${editing ? escapeHtml(editing.raw) : ''}</textarea>
         </div>
+        <div class="form-field">
+            <label for="fGrammar">📐 文法重點（選填，一行一個）</label>
+            <p class="hint">格式：<code>文法點名稱 | 正確例句 | 錯誤例句（選填）</code>，用直線 <code>|</code> 分隔。留空則這份教材不會出現「文法練習」分頁。<br>
+            例如：<code>be interested in vs interesting | I am interested in the iPhone 15. | I am interesting in the iPhone 15.</code></p>
+            <textarea id="fGrammar" rows="6" placeholder="Even though...still... | Even though he can find cheaper tickets, the expenses still add up. | \nadd up（片語動詞，第三人稱單數要加s） | The expenses add up. | our ticket budget is add up">${editing ? escapeHtml(grammarPointsToRaw(editing.grammarPoints)) : ''}</textarea>
+        </div>
         <div class="flex-row">
             <button class="btn btn-primary" onclick="saveEpisodeForm(${editing ? editing.id : 'null'})">💾 儲存教材</button>
             ${editing ? `<button class="btn btn-secondary" onclick="goToView('library')">取消</button>` : ''}
@@ -777,14 +809,17 @@ function saveEpisodeForm(editId) {
         return;
     }
     const { speakerCounts, vocab } = analyzeEpisode(dialogue);
+    const grammarRaw = document.getElementById('fGrammar').value;
+    const grammarPoints = parseGrammarPoints(grammarRaw);
 
     if (editId) {
         const ep = getEpisode(editId);
         ep.type = type; ep.category = category; ep.order = order; ep.title = title;
         ep.raw = raw; ep.dialogue = dialogue; ep.speakerCounts = speakerCounts; ep.vocab = vocab; ep.sceneBreaks = sceneBreaks;
+        ep.grammarPoints = grammarPoints;
     } else {
         episodes.push({
-            id: Date.now(), type, category, order, title, raw, dialogue, speakerCounts, vocab, sceneBreaks
+            id: Date.now(), type, category, order, title, raw, dialogue, speakerCounts, vocab, sceneBreaks, grammarPoints
         });
     }
     saveEpisodes();
@@ -808,9 +843,18 @@ function renderPractice(app) {
         <button class="mode-btn ${currentMode === 'listen' ? 'active' : ''}" onclick="switchMode('listen')">🔊 聽力練習</button>
         <button class="mode-btn ${currentMode === 'original' ? 'active' : ''}" onclick="switchMode('original')">📄 原文</button>
         <button class="mode-btn ${currentMode === 'wordbank' ? 'active' : ''}" onclick="switchMode('wordbank')">⭐ 單字庫</button>
+        ${ep.grammarPoints && ep.grammarPoints.length > 0
+            ? `<button class="mode-btn ${currentMode === 'grammar' ? 'active' : ''}" onclick="switchMode('grammar')">📐 文法練習</button>`
+            : ''}
     </div>
     <div id="modeContent"></div>`;
     app.innerHTML = inner;
+
+    // If this episode has no grammar points but the view somehow landed on that mode
+    // (e.g. switching from a different episode that had one), fall back to cloze.
+    if (currentMode === 'grammar' && (!ep.grammarPoints || ep.grammarPoints.length === 0)) {
+        currentMode = 'cloze';
+    }
 
     const modeContent = document.getElementById('modeContent');
     if (currentMode === 'cloze') renderCloze(modeContent, ep);
@@ -819,6 +863,7 @@ function renderPractice(app) {
     else if (currentMode === 'listen') renderListening(modeContent, ep);
     else if (currentMode === 'original') renderOriginal(modeContent, ep);
     else if (currentMode === 'wordbank') renderWordBank(modeContent, ep);
+    else if (currentMode === 'grammar') renderGrammar(modeContent, ep);
 }
 
 function switchMode(mode) {
@@ -1618,6 +1663,156 @@ function removeFromWordBank(word) {
     generateWordBankSet(getEpisode(currentEpisodeId));
     if (wordBankState.index >= wordBankState.cards.length) wordBankState.index = Math.max(0, wordBankState.cards.length - 1);
     renderWordBank(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+}
+
+// ============================= Grammar practice mode (flip cards + spot-the-correct quiz) =============================
+// Only shown when the episode has at least one grammar point saved on it (optional, per-episode field).
+function generateGrammarQuiz(ep) {
+    // Only grammar points that include a wrong example can become a "which is correct" question.
+    const withWrong = ep.grammarPoints.filter(gp => gp.wrong);
+    const others = ep.grammarPoints.filter(gp => !gp.wrong);
+    const quiz = withWrong.map(gp => {
+        // Pull 1-2 distractor "correct" sentences from other grammar points to round out the options
+        // when there aren't enough wrong examples across the set to make a full option list on their own.
+        const distractorPool = ep.grammarPoints.filter(other => other !== gp).map(other => other.correct);
+        const extraDistractors = sample(distractorPool, Math.min(1, distractorPool.length));
+        const options = shuffle([gp.correct, gp.wrong, ...extraDistractors].filter(Boolean));
+        return { name: gp.name, correct: gp.correct, options, checked: false, selected: null };
+    });
+    return quiz;
+}
+
+function renderGrammar(container, ep) {
+    if (!ep.grammarPoints || ep.grammarPoints.length === 0) {
+        container.innerHTML = `<div class="card empty-state">這份教材還沒有加入文法重點。編輯教材時可以在「📐 文法重點」欄位加上，就會出現這個分頁。</div>`;
+        return;
+    }
+    if (grammarState.cards.length === 0 && grammarState.cards !== ep.grammarPoints) {
+        grammarState.cards = ep.grammarPoints;
+    }
+    if (grammarState.quiz.length === 0) {
+        grammarState.quiz = generateGrammarQuiz(ep);
+    }
+
+    let html = `<div class="card">
+        <div class="mode-tabs" style="margin-bottom:14px;">
+            <button class="mode-btn ${grammarState.view === 'cards' ? 'active' : ''}" onclick="switchGrammarView('cards')">🗂️ 翻卡複習</button>
+            <button class="mode-btn ${grammarState.view === 'quiz' ? 'active' : ''}" onclick="switchGrammarView('quiz')">✅ 選擇題糾錯</button>
+        </div>
+    </div>`;
+
+    if (grammarState.view === 'cards') {
+        html += renderGrammarCards(ep);
+    } else {
+        html += renderGrammarQuiz(ep);
+    }
+    container.innerHTML = html;
+}
+
+function switchGrammarView(view) {
+    grammarState.view = view;
+    renderGrammar(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+}
+
+function renderGrammarCards(ep) {
+    const points = ep.grammarPoints;
+    if (grammarState.index >= points.length) grammarState.index = 0;
+    const gp = points[grammarState.index];
+
+    return `<div class="card">
+        <div class="flash-progress">第 ${grammarState.index + 1} / ${points.length} 個文法點</div>
+        <div class="flip-card-wrap">
+            <div class="flip-card ${grammarState.flipped ? 'flipped' : ''}" onclick="flipGrammarCard()">
+                <div class="flip-inner">
+                    <div class="flip-face front">
+                        <div class="word" style="font-size:20px;">${escapeHtml(gp.name)}</div>
+                        ${gp.wrong ? `<div class="small-note" style="margin-top:10px;">❌ ${escapeHtml(gp.wrong)}</div>` : ''}
+                        <div class="small-note" style="margin-top:10px;">點一下看正確例句</div>
+                    </div>
+                    <div class="flip-face back">
+                        <div class="def" style="font-weight:700;color:var(--good);">✅ ${escapeHtml(gp.correct)}</div>
+                        ${gp.wrong ? `<div class="example" style="margin-top:10px;text-decoration:line-through;color:var(--bad);">${escapeHtml(gp.wrong)}</div>` : ''}
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="flash-controls">
+            <button class="btn btn-secondary" onclick="prevGrammarCard()">&larr; 上一個</button>
+            <button class="btn btn-primary" onclick="nextGrammarCard()">下一個 &rarr;</button>
+        </div>
+    </div>`;
+}
+
+function flipGrammarCard() {
+    grammarState.flipped = !grammarState.flipped;
+    renderGrammar(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+}
+function nextGrammarCard() {
+    const ep = getEpisode(currentEpisodeId);
+    grammarState.index = (grammarState.index + 1) % ep.grammarPoints.length;
+    grammarState.flipped = false;
+    renderGrammar(document.getElementById('modeContent'), ep);
+}
+function prevGrammarCard() {
+    const ep = getEpisode(currentEpisodeId);
+    grammarState.index = (grammarState.index - 1 + ep.grammarPoints.length) % ep.grammarPoints.length;
+    grammarState.flipped = false;
+    renderGrammar(document.getElementById('modeContent'), ep);
+}
+
+function renderGrammarQuiz(ep) {
+    if (grammarState.quiz.length === 0) {
+        return `<div class="card empty-state">這份教材的文法重點都沒有附上「錯誤例句」，無法出選擇題。可以到「編輯教材」補上錯誤例句（第三個欄位），或使用「🗂️ 翻卡複習」。</div>`;
+    }
+    if (grammarState.quizIndex >= grammarState.quiz.length) {
+        return `<div class="card empty-state">
+            <p>文法選擇題完成！分數：${grammarState.quizScore} / ${grammarState.quiz.length}</p>
+            <button class="btn btn-primary" onclick="regenerateGrammarQuiz()">🔄 重新測驗</button>
+        </div>`;
+    }
+    const q = grammarState.quiz[grammarState.quizIndex];
+    let html = `<div class="card">
+        <div class="score-badge">題目 ${grammarState.quizIndex + 1} / ${grammarState.quiz.length} &middot; 分數：${grammarState.quizScore} / ${grammarState.quizAnswered}</div>
+        <div class="quiz-question">哪一句是正確的？<br><strong>${escapeHtml(q.name)}</strong></div>
+        <div class="quiz-options">`;
+    q.options.forEach(opt => {
+        let cls = '';
+        if (q.checked) {
+            if (opt === q.correct) cls = 'reveal-correct';
+            else if (opt === q.selected && opt !== q.correct) cls = 'selected-incorrect';
+        }
+        html += `<button class="quiz-opt ${cls}" ${q.checked ? 'disabled' : ''} onclick="answerGrammarQuiz('${jsAttr(opt)}')">${escapeHtml(opt)}</button>`;
+    });
+    html += `</div>`;
+    if (q.checked) {
+        html += `<button class="btn btn-primary" onclick="nextGrammarQuizQuestion()">${grammarState.quizIndex + 1 >= grammarState.quiz.length ? '看結果 →' : '下一題 →'}</button>`;
+    }
+    html += `</div>`;
+    return html;
+}
+
+function answerGrammarQuiz(opt) {
+    const q = grammarState.quiz[grammarState.quizIndex];
+    if (q.checked) return;
+    q.checked = true;
+    q.selected = opt;
+    grammarState.quizAnswered++;
+    if (opt === q.correct) grammarState.quizScore++;
+    renderGrammar(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+}
+
+function nextGrammarQuizQuestion() {
+    grammarState.quizIndex++;
+    renderGrammar(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+}
+
+function regenerateGrammarQuiz() {
+    const ep = getEpisode(currentEpisodeId);
+    grammarState.quiz = generateGrammarQuiz(ep);
+    grammarState.quizIndex = 0;
+    grammarState.quizScore = 0;
+    grammarState.quizAnswered = 0;
+    renderGrammar(document.getElementById('modeContent'), ep);
 }
 
 // ============================= Init =============================
