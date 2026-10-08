@@ -237,6 +237,7 @@
         padding: 20px;
         text-align: center;
         background: #fff;
+        overflow-y: auto;
     }
     .flip-face.back { transform: rotateY(180deg); background: #f8f5ff; }
     .flip-face .word { font-size: 28px; font-weight: 700; color: var(--primary); margin-bottom: 8px; }
@@ -399,7 +400,7 @@ function saveVocabStatus() { localStorage.setItem('friends_vocab_status', JSON.s
 function loadUnknownWords() { return JSON.parse(localStorage.getItem('friends_unknown_words') || '{}'); }
 function saveUnknownWords() { localStorage.setItem('friends_unknown_words', JSON.stringify(unknownWords)); pushToCloud(); }
 function loadDictCache() { return JSON.parse(localStorage.getItem('friends_dict_cache') || '{}'); }
-function saveDictCache() { localStorage.setItem('friends_dict_cache', JSON.stringify(dictCache)); }
+function saveDictCache() { localStorage.setItem('friends_dict_cache', JSON.stringify(dictCache)); pushToCloud(); }
 
 // Migrate episodes saved by the old Friends-only version (season/episode
 // numbers) into the generalized category/order/type model.
@@ -450,7 +451,8 @@ function pushToCloud() {
                 action: 'save',
                 episodes: JSON.stringify(episodes),
                 vocabStatus: JSON.stringify(vocabStatus),
-                unknownWords: JSON.stringify(unknownWords)
+                unknownWords: JSON.stringify(unknownWords),
+                dictCache: JSON.stringify(dictCache)
             })
         }).then(() => setSyncStatus('✅ 已同步到雲端 ' + new Date().toLocaleTimeString()))
           .catch(() => setSyncStatus('⚠️ 同步失敗，請檢查網址或網路'));
@@ -488,9 +490,11 @@ async function pullFromCloudNow() {
         episodes = (cloud.episodes || []).map(migrateEpisode);
         vocabStatus = cloud.vocabStatus || {};
         unknownWords = cloud.unknownWords || {};
+        dictCache = cloud.dictCache || dictCache;
         localStorage.setItem('friends_episodes', JSON.stringify(episodes));
         localStorage.setItem('friends_vocab_status', JSON.stringify(vocabStatus));
         localStorage.setItem('friends_unknown_words', JSON.stringify(unknownWords));
+        saveDictCache();
         setSyncStatus('✅ 已從雲端更新，' + new Date().toLocaleTimeString());
         goToView('library');
     } catch (err) {
@@ -938,7 +942,7 @@ function renderCloze(container, ep) {
             <button class="btn btn-accent" onclick="regenerateCloze()">🔄 換一組</button>
         </div>`;
     clozeState.questions.forEach((q, i) => {
-        html += `<div class="cloze-q">
+        html += `<div class="cloze-q listen-line ${listenState.playingIndex === i ? 'current-playing' : ''}" id="clozeQ${i}">
             ${renderClozeContext(q.context)}
             <div class="cloze-q-header">
                 ${q.speaker ? `<div class="speaker">${escapeHtml(q.speaker)}</div>` : `<div></div>`}
@@ -988,16 +992,25 @@ function regenerateCloze() {
 function playClozeSentence(i) {
     const q = clozeState.questions[i];
     if (!q) return;
+    listenState.playingIndex = i;
+    renderCloze(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
     // Replace the blank with a brief pause instead of speaking it (or the word "blank").
     const spoken = q.sentence.replace('_____', ',').replace(/\s+/g, ' ').trim();
-    speakText(spoken);
+    speakText(spoken, () => {
+        listenState.playingIndex = -1;
+        renderCloze(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+    });
 }
 
 function playAllClozeSentences() {
     let i = 0;
     function playNext() {
-        if (i >= clozeState.questions.length) return;
+        if (i >= clozeState.questions.length) { listenState.playingIndex = -1; renderCloze(document.getElementById('modeContent'), getEpisode(currentEpisodeId)); return; }
         const q = clozeState.questions[i];
+        listenState.playingIndex = i;
+        renderCloze(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+        const row = document.getElementById('clozeQ' + i);
+        if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
         const spoken = q.sentence.replace('_____', ',').replace(/\s+/g, ' ').trim();
         speakText(spoken, () => { i++; playNext(); });
     }
@@ -1005,27 +1018,136 @@ function playAllClozeSentences() {
 }
 
 // ============================= Flashcards mode =============================
-async function fetchDefinition(word) {
-    if (dictCache[word]) return dictCache[word];
+// Always hits the free dictionary API (used only by the explicit "🔍 自動查詢" button in the
+// manual-edit form) — it does NOT read from or write to dictCache itself, since dictCache is now
+// the store for the user's own hand-typed definitions and must never be silently overwritten.
+// Aborts after 6s so it can never leave a button stuck in a loading state.
+async function fetchDictionaryApi(word) {
     try {
-        const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`, { signal: controller.signal });
+        clearTimeout(timeoutId);
         if (!res.ok) throw new Error('not found');
         const data = await res.json();
         const entry = data[0];
         const meaning = entry.meanings && entry.meanings[0];
         const def = meaning && meaning.definitions && meaning.definitions[0];
-        const result = {
+        return {
             partOfSpeech: meaning ? meaning.partOfSpeech : '',
             definition: def ? def.definition : '',
             phonetic: entry.phonetic || ''
         };
-        dictCache[word] = result;
-        saveDictCache();
-        return result;
     } catch (e) {
-        dictCache[word] = null;
         return null;
     }
+}
+
+// ============================= Manual word definitions (詞性 / KK音標 / 中英解釋 / 例句) =============================
+// dictCache[word] now stores the user's own hand-typed entry: { pos, kk, defEn, defZh, example }.
+// It is looked up synchronously (no network call) everywhere a card is flipped, so flipping never
+// hangs. A legacy entry saved by the old auto-fetch version ({partOfSpeech, definition, phonetic})
+// is still read correctly by normalizeDictEntry below.
+function normalizeDictEntry(entry) {
+    if (!entry) return null;
+    return {
+        pos: entry.pos || entry.partOfSpeech || '',
+        kk: entry.kk || entry.phonetic || '',
+        defEn: entry.defEn || entry.definition || '',
+        defZh: entry.defZh || '',
+        example: entry.example || ''
+    };
+}
+
+function renderDefinitionDisplay(word, rawEntry, fallbackExample, mode) {
+    const norm = normalizeDictEntry(rawEntry);
+    const example = (norm && norm.example) || fallbackExample || '';
+    const hasContent = norm && (norm.pos || norm.kk || norm.defEn || norm.defZh);
+    const editBtn = `<button class="btn btn-secondary" style="margin-top:10px;" onclick="event.stopPropagation(); openDefinitionEditor('${mode}')">✏️ ${hasContent ? '編輯字義' : '輸入字義'}</button>`;
+    if (!hasContent) {
+        return `<div class="def" style="color:var(--muted);">尚未輸入字義</div>
+            ${example ? `<div class="example">"${escapeHtml(example)}"</div>` : ''}
+            ${editBtn}`;
+    }
+    return `
+        <div class="pos">${escapeHtml(norm.pos)}${norm.kk ? ' [' + escapeHtml(norm.kk) + ']' : ''}</div>
+        ${norm.defZh ? `<div class="def">${escapeHtml(norm.defZh)}</div>` : ''}
+        ${norm.defEn ? `<div class="example" style="font-style:normal;">${escapeHtml(norm.defEn)}</div>` : ''}
+        ${example ? `<div class="example">"${escapeHtml(example)}"</div>` : ''}
+        ${editBtn}`;
+}
+
+function buildDefinitionEditFormHtml(word, rawEntry, fallbackExample, mode) {
+    const norm = normalizeDictEntry(rawEntry) || { pos: '', kk: '', defEn: '', defZh: '', example: '' };
+    const example = norm.example || fallbackExample || '';
+    return `<div style="width:100%;text-align:left;" onclick="event.stopPropagation();">
+        <label style="margin-top:0;">詞性</label>
+        <input type="text" id="defPos" value="${escapeHtml(norm.pos)}" placeholder="例如：n. / v. / adj.">
+        <label>KK音標</label>
+        <input type="text" id="defKK" value="${escapeHtml(norm.kk)}" placeholder="例如：[rɪˋklaɪn]">
+        <label>中文解釋</label>
+        <textarea id="defZh" rows="2" placeholder="輸入中文解釋">${escapeHtml(norm.defZh)}</textarea>
+        <label>英文解釋（選填）</label>
+        <textarea id="defEn" rows="2" placeholder="英文解釋，選填">${escapeHtml(norm.defEn)}</textarea>
+        <label>例句（已自動帶入文章中的句子，可自行修改）</label>
+        <textarea id="defExample" rows="2">${escapeHtml(example)}</textarea>
+        <div class="flex-row" style="margin-top:8px;">
+            <button class="btn btn-primary" onclick="event.stopPropagation(); saveDefinitionEditor('${jsAttr(word)}', '${mode}')">💾 儲存</button>
+            <button class="btn btn-accent" onclick="event.stopPropagation(); autoFillFromDictionary('${jsAttr(word)}')">🔍 自動查詢英文字典帶入</button>
+            <button class="btn btn-secondary" onclick="event.stopPropagation(); cancelDefinitionEditor('${mode}')">取消</button>
+        </div>
+    </div>`;
+}
+
+function cardAndExampleFor(mode) {
+    if (mode === 'wordbank') {
+        const card = wordBankState.cards[wordBankState.index];
+        return card ? { word: card.word, example: card.example || '' } : null;
+    }
+    const card = flashState.cards[flashState.index];
+    return card ? { word: card.word, example: card.example || '' } : null;
+}
+
+function openDefinitionEditor(mode) {
+    const current = cardAndExampleFor(mode);
+    if (!current) return;
+    const backEl = document.getElementById(mode === 'wordbank' ? 'wordBankCardBack' : 'cardBack');
+    if (!backEl) return;
+    backEl.innerHTML = buildDefinitionEditFormHtml(current.word, dictCache[current.word], current.example, mode);
+}
+
+function cancelDefinitionEditor(mode) {
+    if (mode === 'wordbank') renderWordBank(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+    else renderFlashcards(document.getElementById('modeContent'), getEpisode(currentEpisodeId));
+}
+
+function saveDefinitionEditor(word, mode) {
+    const pos = document.getElementById('defPos').value.trim();
+    const kk = document.getElementById('defKK').value.trim();
+    const defZh = document.getElementById('defZh').value.trim();
+    const defEn = document.getElementById('defEn').value.trim();
+    const example = document.getElementById('defExample').value.trim();
+    dictCache[word] = { pos, kk, defEn, defZh, example };
+    saveDictCache();
+    cancelDefinitionEditor(mode);
+}
+
+function autoFillFromDictionary(word) {
+    const posEl = document.getElementById('defPos');
+    const kkEl = document.getElementById('defKK');
+    const enEl = document.getElementById('defEn');
+    if (enEl) enEl.value = '查詢中…';
+    fetchDictionaryApi(word).then(info => {
+        if (!document.getElementById('defEn')) return; // form was closed before the lookup finished
+        if (info) {
+            if (posEl && info.partOfSpeech) posEl.value = info.partOfSpeech;
+            if (kkEl && info.phonetic) kkEl.value = info.phonetic;
+            if (enEl) enEl.value = info.definition || '（查無英文解釋）';
+        } else {
+            if (enEl) enEl.value = '';
+            alert('查無字典資料，或目前網路連不到字典服務，請自行輸入。');
+        }
+    });
 }
 
 function generateFlashSet(ep) {
@@ -1057,7 +1179,7 @@ function renderFlashcards(container, ep) {
                         <div class="small-note">${card.count > 0 ? `出現 ${card.count} 次 &middot; ` : '📝 練習時存下的單字 &middot; '}${status === 'known' ? '⭐ 已熟悉' : '點一下翻面'}</div>
                     </div>
                     <div class="flip-face back" id="cardBack">
-                        <div class="small-note">載入字義中…</div>
+                        ${renderDefinitionDisplay(card.word, dictCache[card.word], card.example, 'flash')}
                     </div>
                 </div>
             </div>
@@ -1073,25 +1195,6 @@ function renderFlashcards(container, ep) {
         </div>
     </div>`;
     container.innerHTML = html;
-
-    if (flashState.flipped) loadCardBack(card);
-}
-
-async function loadCardBack(card) {
-    const backEl = document.getElementById('cardBack');
-    if (!backEl) return;
-    const info = await fetchDefinition(card.word);
-    if (!backEl) return;
-    const exampleHtml = card.example ? `<div class="example">"${escapeHtml(card.example)}"</div>` : '';
-    if (info && info.definition) {
-        backEl.innerHTML = `
-            <div class="pos">${escapeHtml(info.partOfSpeech || '')} ${info.phonetic ? escapeHtml(info.phonetic) : ''}</div>
-            <div class="def">${escapeHtml(info.definition)}</div>
-            ${exampleHtml}`;
-    } else {
-        backEl.innerHTML = `<div class="def">（找不到字典解釋——可能離線或查無此字）</div>
-            ${exampleHtml}`;
-    }
 }
 
 function flipCard() {
@@ -1551,11 +1654,13 @@ function renderOriginal(container, ep) {
     let html = `<div class="card">
         <span class="score-badge">📄 原文全文</span>
         ${renderVoiceToolbar({})}`;
+    let globalIdx = 0;
     groups.forEach(lines => {
         html += `<div class="reading-lines" style="margin-bottom:14px;">`;
         lines.forEach(d => {
             const clean = cleanText(d.text);
-            html += `<div class="reading-line">
+            const i = globalIdx++;
+            html += `<div class="reading-line listen-line ${listenState.playingIndex === i ? 'current-playing' : ''}" id="listenLine${i}">
                 <span class="line-text">${d.speaker ? `<span class="speaker">${escapeHtml(d.speaker)}:</span> ` : ''}${renderClickableText(clean)}</span>
             </div>`;
         });
@@ -1599,7 +1704,7 @@ function renderWordBank(container, ep) {
                         <div class="small-note">📝 已標示的單字 &middot; ${status === 'known' ? '⭐ 已熟悉' : '點一下翻面'}</div>
                     </div>
                     <div class="flip-face back" id="wordBankCardBack">
-                        <div class="small-note">載入字義中…</div>
+                        ${renderDefinitionDisplay(card.word, dictCache[card.word], card.example, 'wordbank')}
                     </div>
                 </div>
             </div>
@@ -1615,24 +1720,6 @@ function renderWordBank(container, ep) {
         </div>
     </div>`;
     container.innerHTML = html;
-
-    if (wordBankState.flipped) loadWordBankCardBack(card);
-}
-
-async function loadWordBankCardBack(card) {
-    const backEl = document.getElementById('wordBankCardBack');
-    if (!backEl) return;
-    const info = await fetchDefinition(card.word);
-    if (!backEl) return;
-    const exampleHtml = card.example ? `<div class="example">"${escapeHtml(card.example)}"</div>` : '';
-    if (info && info.definition) {
-        backEl.innerHTML = `
-            <div class="pos">${escapeHtml(info.partOfSpeech || '')} ${info.phonetic ? escapeHtml(info.phonetic) : ''}</div>
-            <div class="def">${escapeHtml(info.definition)}</div>
-            ${exampleHtml}`;
-    } else {
-        backEl.innerHTML = `<div class="def">（找不到字典解釋——可能離線或查無此字）</div>${exampleHtml}`;
-    }
 }
 
 function flipWordBankCard() {
@@ -1829,9 +1916,11 @@ async function init() {
             episodes = (cloud.episodes || episodes).map(migrateEpisode);
             vocabStatus = cloud.vocabStatus || vocabStatus;
             unknownWords = cloud.unknownWords || unknownWords;
+            dictCache = cloud.dictCache || dictCache;
             localStorage.setItem('friends_episodes', JSON.stringify(episodes));
             localStorage.setItem('friends_vocab_status', JSON.stringify(vocabStatus));
             localStorage.setItem('friends_unknown_words', JSON.stringify(unknownWords));
+            saveDictCache();
         } catch (err) {
             console.error('雲端同步失敗，改用本機資料', err);
         }
